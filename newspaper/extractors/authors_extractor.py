@@ -128,18 +128,11 @@ class AuthorsExtractor:
 
         json_ld_scripts = parsers.get_ld_json_object(doc)
 
-        for script_tag in json_ld_scripts:
-            if "@graph" in script_tag:
-                for item in script_tag.get("@graph", []):
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("@type") == "Person":
-                        authors.append(item.get("name", ""))
-                    if "author" in item:
-                        authors.extend(self._get_authors_from_ld(item["author"]))
-            else:
-                if "author" in script_tag:
-                    authors.extend(self._get_authors_from_ld(script_tag["author"]))
+        for node in parsers.iter_json_ld_nodes(json_ld_scripts):
+            if node.get("@type") == "Person":
+                authors.append(node.get("name", ""))
+            if "author" in node:
+                authors.extend(self._get_authors_from_ld(node["author"]))
 
         authors = [re.sub(r"[\n\t\r\xa0]", " ", x) for x in authors if x]
         doc_root = doc.getroottree()

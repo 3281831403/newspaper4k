@@ -1,5 +1,12 @@
 # Change Log
 
+### Unreleased
+
+### Bugs fixed:
+
+- Populate `Article.meta_site_name`, `meta_description`, `canonical_link`, `authors` and `publish_date` from JSON-LD on pages without og/meta tags. The structured data traversal now unwraps `<!-- -->` comment markers, enters Yoast style `@graph` arrays and article nodes nested under `mainEntity`. Head og/meta values still take precedence and existing extraction results are unchanged
+- `publish_date` is only derived from `datePublished` (never `dateModified`); the JSON-LD fallback values are included in `Article.to_json()`
+
 ### 0.9.6.1 (2026-11-01)
 
 Security release. Fixes a server-side request forgery (SSRF, CWE-918) in versions up to and including 0.9.6. Page content could make the server request internal addresses (loopback, private ranges, cloud metadata endpoints such as `169.254.169.254`), for example through `<img src>` or `og:image` URLs fetched during `Article.parse()`.

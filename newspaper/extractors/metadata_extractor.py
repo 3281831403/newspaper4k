@@ -2,7 +2,7 @@
 
 import re
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from lxml.html import HtmlElement
 
@@ -40,10 +40,108 @@ class MetadataExtractor:
         self.meta_data["canonical_link"] = self._get_canonical_link(article_url, doc)
         self.meta_data["site_name"] = self._get_meta_field(doc, "og:site_name")
         self.meta_data["description"] = self._get_meta_field(doc, ["description", "og:description"])
+
+        # JSON-LD is only a fallback: when the head already provides an
+        # og/meta value it must not override it, so existing results for
+        # pages with meta tags are unchanged.
+        json_ld_fallback = self._get_json_ld_fallback(article_url, doc)
+        if not self.meta_data["canonical_link"]:
+            self.meta_data["canonical_link"] = json_ld_fallback["canonical_link"]
+        if not self.meta_data["site_name"]:
+            self.meta_data["site_name"] = json_ld_fallback["site_name"] or ""
+        if not self.meta_data["description"]:
+            self.meta_data["description"] = json_ld_fallback["description"] or ""
+
         self.meta_data["keywords"] = [k.strip() for k in self._get_meta_field(doc, "keywords").split(",")]
         self.meta_data["data"] = self._get_metadata(doc)
 
         return self.meta_data
+
+    def _get_json_ld_fallback(self, article_url: str, doc: HtmlElement) -> dict[str, str | None]:
+        """Extract site_name, description and canonical link from JSON-LD.
+
+        Used as a fallback for pages that only expose structured data
+        (including Yoast ``@graph`` payloads and articles nested under
+        ``mainEntity``). Fields that cannot be found stay ``None`` and the
+        caller normalizes string fields to empty strings.
+        """
+        fallback: dict[str, str | None] = {
+            "site_name": None,
+            "description": None,
+            "canonical_link": None,
+        }
+        json_ld_scripts = parsers.get_ld_json_object(doc)
+        if not json_ld_scripts:
+            return fallback
+
+        article_nodes = list(parsers.iter_json_ld_article_nodes(json_ld_scripts))
+
+        for node in article_nodes:
+            if fallback["description"] is None:
+                description = node.get("description")
+                if isinstance(description, str) and description.strip():
+                    fallback["description"] = description.strip()
+            if fallback["canonical_link"] is None:
+                fallback["canonical_link"] = self._get_canonical_from_json_ld(node, article_url)
+
+        # Site name: prefer the article's publisher/name, then a WebSite
+        # node living next to it (typical Yoast @graph layout).
+        for node in article_nodes:
+            name = self._get_publisher_name(node.get("publisher"))
+            if name:
+                fallback["site_name"] = name
+                break
+
+        if fallback["site_name"] is None:
+            for node in parsers.iter_json_ld_nodes(json_ld_scripts):
+                if node.get("@type") in ("WebSite", "WebPage", "NewsMediaOrganization"):
+                    name = node.get("name")
+                    if isinstance(name, str) and name.strip():
+                        fallback["site_name"] = name.strip()
+                        break
+
+        return fallback
+
+    @staticmethod
+    def _get_publisher_name(publisher: Any) -> str | None:
+        """Return the name of a JSON-LD publisher field if it is a string."""
+        if isinstance(publisher, dict):
+            name = publisher.get("name")
+        elif isinstance(publisher, list):
+            name = next((item.get("name") for item in publisher if isinstance(item, dict)), None)
+        else:
+            name = None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return None
+
+    @staticmethod
+    def _get_canonical_from_json_ld(node: dict, article_url: str) -> str | None:
+        """Extract a canonical URL from a JSON-LD article node.
+
+        Checks ``url`` and ``mainEntityOfPage`` (string, object with ``@id``
+        or ``url``). Relative values are resolved against the article URL.
+        """
+        candidates: list[Any] = [node.get("url")]
+
+        main_entity = node.get("mainEntityOfPage")
+        if isinstance(main_entity, str):
+            candidates.append(main_entity)
+        elif isinstance(main_entity, dict):
+            candidates.append(main_entity.get("@id"))
+            candidates.append(main_entity.get("url"))
+        elif isinstance(main_entity, list):
+            for item in main_entity:
+                if isinstance(item, str):
+                    candidates.append(item)
+                elif isinstance(item, dict):
+                    candidates.append(item.get("@id"))
+                    candidates.append(item.get("url"))
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return urljoin(article_url, candidate.strip())
+        return None
 
     def _get_meta_language(self, doc: HtmlElement) -> str | None:
         """Return the language string of the article, or None if it cannot be

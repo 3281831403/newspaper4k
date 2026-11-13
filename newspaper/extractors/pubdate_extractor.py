@@ -64,26 +64,38 @@ class PubdateExtractor:
         json_ld_scripts = parsers.get_ld_json_object(doc)
 
         for script_tag in json_ld_scripts:
-            if "@graph" in script_tag:
-                for item in script_tag.get("@graph", []):
-                    if not isinstance(item, dict):
-                        continue
-                    date_str = item.get("datePublished")
-                    if date_str is None:
-                        continue
-                    datetime_obj = self._parse_date_str(date_str)
-                    if datetime_obj:
-                        date_matches.append((datetime_obj, 10))
+            if not isinstance(script_tag, dict):
+                continue
+            # Nodes inside a "@graph" keep the historical higher score (10);
+            # standalone article nodes and nodes nested under "mainEntity"
+            # keep the historical score of 9.
+            graph_nodes = script_tag.get("@graph") if "@graph" in script_tag else None
+            if isinstance(graph_nodes, list):
+                article_nodes = [
+                    item for item in graph_nodes if isinstance(item, dict) and item.get("datePublished") is not None
+                ]
+                score = 10
             else:
-                for k in script_tag:
-                    if k == "datePublished":
-                        datetime_obj = self._parse_date_str(script_tag[k])
-                        if datetime_obj:
-                            date_matches.append((datetime_obj, 9))
-                    elif k == "dateCreated":
-                        datetime_obj = self._parse_date_str(script_tag[k])
-                        if datetime_obj:
-                            date_matches.append((datetime_obj, 7))
+                article_nodes = [
+                    item
+                    for item in parsers.iter_json_ld_article_nodes([script_tag])
+                    if item.get("datePublished") is not None
+                ]
+                score = 9
+
+            for item in article_nodes:
+                date_str = item.get("datePublished")
+                datetime_obj = self._parse_date_str(date_str)
+                if datetime_obj:
+                    date_matches.append((datetime_obj, score))
+
+            # Backwards compatible fallback: top level "dateCreated" on a
+            # plain (non @graph) JSON-LD object. dateModified is never used
+            # because the publication date must reflect datePublished.
+            if graph_nodes is None and "dateCreated" in script_tag:
+                datetime_obj = self._parse_date_str(script_tag["dateCreated"])
+                if datetime_obj:
+                    date_matches.append((datetime_obj, 7))
 
         # get <time> tags
         for item in parsers.get_tags(doc, tag="time"):

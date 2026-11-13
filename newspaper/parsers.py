@@ -10,6 +10,7 @@ from collections import deque
 from copy import deepcopy
 from html import unescape
 from math import exp
+from typing import Any
 
 import lxml.etree
 import lxml.html
@@ -298,20 +299,133 @@ def outer_html(node):
     return node_to_string(e0)
 
 
+# Schema.org types that represent a news article or another piece of
+# authored content. Pages often embed the article node inside a "@graph"
+# (Yoast) or under "mainEntity", so the type list is shared by the
+# metadata, authors and publication date extractors.
+_JSON_LD_ARTICLE_TYPES = {
+    "article",
+    "advertisercontentarticle",
+    "analysisnewsarticle",
+    "apinews",
+    "backgroundnewsarticle",
+    "blogposting",
+    "bookseries",
+    "collectionpage",
+    "discussionforumposting",
+    "liveblogposting",
+    "newsarticle",
+    "opinionnewsarticle",
+    "reportagenewsarticle",
+    "report",
+    "reviewnewsarticle",
+    "satiricalarticle",
+    "scholarlyarticle",
+    "socialmediaposting",
+    "techarticle",
+}
+
+
+def _strip_json_ld_comments(script_text: str | None) -> str | None:
+    """Remove HTML comment markers some sites wrap JSON-LD scripts in.
+
+    Server side rendered pages (and frameworks such as Next.js) frequently
+    emit ``<script type="application/ld+json"><!-- ... --></script>``.
+    The comment markers make the payload invalid JSON, so they have to be
+    stripped before decoding.
+    """
+    if not script_text:
+        return script_text
+    text = script_text.strip()
+    if text.startswith("<!--"):
+        text = text[4:]
+    if text.endswith("-->"):
+        text = text[:-3]
+    return text.strip()
+
+
+def _json_ld_type_matches(node: Any, expected_types: set[str]) -> bool:
+    """Check whether a JSON-LD node's "@type" belongs to expected_types.
+
+    "@type" can be a single string or a list of strings. The comparison is
+    case-insensitive.
+    """
+    node_type = node.get("@type")
+    if isinstance(node_type, str):
+        types = [node_type]
+    elif isinstance(node_type, list):
+        types = node_type
+    else:
+        return False
+    return any(isinstance(t, str) and t.lower() in expected_types for t in types)
+
+
+def iter_json_ld_nodes(json_ld_scripts: list[dict]) -> Any:
+    """Yield every dict node contained in JSON-LD script objects.
+
+    The traversal descends into ``@graph`` arrays (Yoast style structured
+    data) and ``mainEntity`` objects/arrays (an article nested under a
+    WebPage), so callers do not have to special case those layouts.
+    """
+    for script_tag in json_ld_scripts:
+        if isinstance(script_tag, dict):
+            yield from _iter_json_ld_nodes(script_tag)
+
+
+def _iter_json_ld_nodes(node: dict) -> Any:
+    yield node
+
+    graph = node.get("@graph")
+    if isinstance(graph, list):
+        for item in graph:
+            if isinstance(item, dict):
+                yield from _iter_json_ld_nodes(item)
+
+    main_entity = node.get("mainEntity")
+    if isinstance(main_entity, dict):
+        yield from _iter_json_ld_nodes(main_entity)
+    elif isinstance(main_entity, list):
+        for item in main_entity:
+            if isinstance(item, dict):
+                yield from _iter_json_ld_nodes(item)
+
+
+def iter_json_ld_article_nodes(json_ld_scripts: list[dict]) -> Any:
+    """Yield the article-like nodes contained in JSON-LD script objects.
+
+    Filters :func:`iter_json_ld_nodes` down to nodes whose ``@type`` denotes
+    an article (NewsArticle, BlogPosting, ...). Container nodes such as a
+    Yoast ``@graph`` wrapper are skipped. Nodes without a ``@type`` are only
+    yielded when they are leaf objects carrying article fields, so a plain
+    ``{"datePublished": ...}`` object still works.
+    """
+    for node in iter_json_ld_nodes(json_ld_scripts):
+        if _json_ld_type_matches(node, _JSON_LD_ARTICLE_TYPES):
+            yield node
+        elif node.get("@type") is None and "@graph" not in node and "mainEntity" not in node:
+            yield node
+
+
 def get_ld_json_object(node):
-    """Get the JSON-LD object from the node"""
+    """Get the JSON-LD objects from the node.
+
+    Returns a list of decoded JSON objects found in
+    ``<script type="application/ld+json">`` tags. Script payloads wrapped in
+    HTML comments (``<!-- ... -->``) are unwrapped first, and top-level JSON
+    arrays are flattened into the result list.
+    """
     # yoast seo structured data
     json_ld = get_tags(node, tag="script", attribs={"type": "application/ld+json"})
     res = []
     if json_ld:
         for script_tag in json_ld:
             try:
-                schema_json = json.loads(script_tag.text)
+                schema_json = json.loads(_strip_json_ld_comments(script_tag.text))
             except Exception:
                 continue
             if isinstance(schema_json, list):
                 res.extend(item for item in schema_json if isinstance(item, dict))
-            else:
+            elif isinstance(schema_json, dict):
                 res.append(schema_json)
 
     return res
